@@ -6,7 +6,7 @@ install.packages("VennDiagram")
 
 install.packages("caret")
 install.packages("e1071")
-install.packages("pls")
+install.packages(c("pls", "randomForest"))
 install.packages("pROC")
 
 
