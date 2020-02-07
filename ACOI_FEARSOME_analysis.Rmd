@@ -1,0 +1,854 @@
+---
+title: "SUM2017"
+author: "Sue, Steffen, Kristian, Jos,"
+date: "2/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r script}
+
+# A Case of Identity: Feature Selection for Species Classification in LCMS based Eco-Metabolomics
+# A Case of Identity: Feature Selection for Species Classification in LCMS based Eco-Metabolomics
+rm(list = objects())
+
+# ---- load library ----
+library(doParallel) # Parallel processing
+library(gplots)
+library(caret)
+
+
+# ---- Set up parallel processing -----
+detectCores()
+nCore= detectCores()-1   # Number of processor cores to use
+cl=makeCluster(nCore)   
+registerDoParallel(cl)
+
+
+# ---- Set encoding of files and set locale ----
+options(encoding="UTF-8")
+#Sys.setlocale(category="LC_ALL", locale="C")
+
+
+# ---- Load Data ----
+setwd("L:/Uni Skripte/PhD Project/Paper/Feature_Selection_In_EcoMetabolomics/originalData/")
+
+
+
+
+#Load data MTBLS679 
+# setwd("L:/Uni Skripte/PhD Project/Paper/Feature_Selection_In_EcoMetabolomics/originalData/VascularPlants_MacBeSSt/")
+load(file = "VascularPlants_MacBeSSt/MTBLS679_OutlierRemoval_noisImp.rda")
+dM679 <- dMnoisImpSBCOut # log10; noiseImputed = abs(rnorm(sum(NAidx), mean=70, sd=20); outlier free
+meta679 <- meta
+
+
+# Load data MTBLS520
+dM520 <- data.frame(t(read.table(file="Bryophytes_KPeters/MTBLS520_dataMatrix.tsv.tabular", header=T, row.names=1)))
+meta520 <- data.frame(read.table(file="Bryophytes_KPeters/MTBLS520_sampleMetadata.tsv.tabular", header=T, row.names=1, sep="\t"))
+
+## impute Missing data
+NAidx <- dM520 == 0
+#impute data with random noise 0 and 100 # adapt for MTBLS520 smallest values are around 1.2 
+set.seed(1891) #to make imputation reproducible
+impnum <- abs(rnorm(sum(NAidx), mean=1, sd=0.2)) #mean=70, sd=20; impute abs, so we dont get negative values, check if 70, 20 is usefull for 520
+dM520[NAidx] <- impnum
+dM520 <- log10(dM520)
+
+# clean up data MTBLS520
+which(is.na(dM520))
+which(dM520 == 0)
+dM520[1:5, 1310:1313]
+
+####
+
+
+# ---- functions ----
+# ---------- Select features from model ----------
+f.select_features_from_model <- function(feat_list, model_varimp, feat_class) {
+  # Create list
+  sel_list <- list()
+  
+  # Limit selected features between keepx_max and keepx_min
+  for (i in unique(feat_class)) {
+    elements <- colnames(feat_list)[which(model_varimp[,i] >= 0.95 * max(model_varimp[,i]))]
+    
+    if (length(elements) > keepx_max) {
+      sel_list[[i]] <- colnames(feat_list)[base::order(model_varimp[, i], decreasing=TRUE)[1:keepx_max]]
+    } else if (length(elements) < keepx_min) {
+      sel_list[[i]] <- colnames(feat_list)[base::order(model_varimp[, i], decreasing=TRUE)[1:keepx_min]]
+    } else {
+      sel_list[[i]] <- elements
+    }
+    
+    sel_list[[i]] <- sort(sel_list[[i]])
+  }
+  
+  # Return selected features
+  return(sel_list)
+}
+
+
+
+# ---------- number of selected features ----------
+f.count.selected_features <- function(sel_feat) {
+  # Return number of selected features
+  return(length(unlist(sel_feat))) # return(length(unique(unlist(sel_feat))))
+}
+
+# ---------- Draw heatmap of selected features ----------
+f.heatmap.selected_features <- function(feat_list, sel_feat, filename, main, metadata) {
+  # Data frame with only selected features
+  sel_list <-  as.data.frame(feat_list[,c(sort(as.character(unique(unlist(sel_feat))))), drop=FALSE])  
+  # Draw heatmap
+  # if (! is.null(filename)) pdf(file=as.character(filename), encoding="ISOLatin1", pointsize=10, width=10, height=10, family="Helvetica")
+  heatmap.2(x=as.matrix(sel_list), scale="col", cexRow=0.06, cexCol=0.1, main=main, dendrogram = "col",
+            # Rowv=as.dendrogram(hclust(dist(scale(sel_list),method="maximum"),method="ward.D"), center=T), offsetRow=0, #<< samples need to be sorted by SpecCode (not clustered)
+            # Rowv=as.dendrogram(hclust(dist(as.numeric(as.factor(mymetadata$SpecCode))),method="ward.D"), center=T), offsetRow=0, #<< samples need to be sorted by SpecCode (not clustered)
+            Rowv=as.dendrogram(hclust(dist(as.numeric(as.factor(metadata))),method="ward.D"), center=T), offsetRow=0, #<< samples need to be sorted by SpecCode (not clustered)
+            Colv=as.dendrogram(hclust(dist(t(scale(sel_list)),method="maximum"),method="ward.D"), center=T), offsetCol=0,
+            col=colorRampPalette(c('darkblue','white','darkred'), alpha=0.1, bias=1)(256),
+            trace="none", margins=c(4,8.5),
+            key=TRUE, key.title="Color key")
+  #if (! is.null(filename))
+  # dev.off()
+}
+
+
+
+
+# ---- Variables -----
+polarity <- "positive"
+pol <- substr(x=polarity, start=1, stop=3)
+
+# Feature matrix
+feat_matrix679 <-  t(dM679) #t(myBCOutdata) is using imputed data
+feat_matrix520 <-  t(dM520) #t(myBCOutdata) is using imputed data
+
+# Feature List 
+feat_list679 <- as.data.frame(t(feat_matrix679))
+feat_list520 <- as.data.frame(t(feat_matrix520))
+
+for (i in ncol(feat_list679)) feat_list679[,i] <- as.numeric(feat_list679[,i])
+for (i in ncol(feat_list520)) feat_list520[,i] <- as.numeric(feat_list520[,i])
+
+# Selection factor
+feat_class679 <- meta679$SpecCode
+feat_class520 <- meta520$class
+
+# Colors for selection factor
+feat_class_colors679 <- unique(feat_class679)
+feat_class_colors679 <- rainbow(length(feat_class_colors679))
+feat_class_colors679 <- sapply(feat_class679, function(x) { x <- feat_class_colors679[which(x==unique(feat_class679))] } )
+
+feat_class_colors520 <- unique(feat_class520)
+feat_class_colors520 <- rainbow(length(feat_class_colors520))
+feat_class_colors520 <- sapply(feat_class520, function(x) { x <- feat_class_colors520[which(x==unique(feat_class520))] } )
+
+# Symbols for selection factor
+feat_class_symbols679 <- unique(feat_class679)
+feat_class_symbols679 <- c(1:length(feat_class_symbols679))
+feat_class_symbols679 <- sapply(feat_class679, function(x) { x <- feat_class_symbols679[which(x==unique(feat_class679))] } )
+
+feat_class_symbols520 <- unique(feat_class520)
+feat_class_symbols520 <- c(1:length(feat_class_symbols520))
+feat_class_symbols520 <- sapply(feat_class520, function(x) { x <- feat_class_symbols520[which(x==unique(feat_class520))] } )
+
+# Options for PLS/SVM
+multilevel_group <- c(rep(1,20), rep(2,20))         # Factor group, can be NULL
+ncomp <-  20                       # Number of components
+nfolds <- 5                       # Number of folds for cross-validation
+nrepeat <- 10                     # Number of repeats for validation
+keepx_max <- 2000#60                  # Number of maximum variables selected for a class #length(dM679) %/% length(levels(feat_class679)) #
+keepx_min <- 1#20                   # Number of minimum variables selected for a class
+keepx_step <- (keepx_max - keepx_min) %/% ncomp
+keepx <- round(c(seq(keepx_max, keepx_min, - keepx_step)))         # The number of variables to test from the X data set (number of entries should be equal ncomp)
+
+save(feat_class679, feat_list679, feat_list520, feat_class520, file = "MetaData.rda")
+
+
+# ---- ANOVA ----
+#MTBLS679
+sel_aov679 <- list()
+for (i in 1:ncol(feat_list679)) { #i<-1553-4
+  aov_fac <- feat_class679
+  aov_list <- data.frame(feature=feat_list679[,i])
+  aov_list <- cbind(aov_list, as.data.frame(model.matrix(~ 0 + aov_fac)))
+  colnames(aov_list)[2:ncol(aov_list)] <- as.character(unique(aov_fac))
+  # ANOVA + post-hoc TukeyHSD for each factor
+  model_aov <- aov(formula=feature ~ aov_fac, data=aov_list)
+  model_tukey <- TukeyHSD(x=model_aov, conf.level=0.995)
+  for (j in unique(aov_fac)) {
+    if (all(model_tukey[[1]][grepl(j, rownames(model_tukey[[1]])), "p adj"] <= 0.005)) {
+      sel_aov679[[j]] <- c(sel_aov679[[j]], colnames(feat_list679)[i])
+      #print(paste(j, colnames(feat_list)[i]))
+    }
+  }
+}
+
+pdf("./VascularPlants_MacBeSSt/Results_Manuscript/ANOVA679.pdf", paper = "a4r", width=11, height=8)
+print(paste("ANOVA Number of selected features:", f.count.selected_features(sel_feat=sel_aov679)))
+f.heatmap.selected_features(feat_list=feat_list679, sel_feat=sel_aov679, filename="feature_selection_anova.pdf", main="ANOVA", 
+                            metadata=meta679$SpecCode)
+dev.off()
+
+#save(sel_aov679, file = "ANOVA679.rda")
+
+
+#MTBLS520
+sel_aov520 <- list()
+for (i in 1:ncol(feat_list520)) { #i<-1553-4
+  aov_fac <- feat_class520
+  aov_list <- data.frame(feature=feat_list520[,i])
+  aov_list <- cbind(aov_list, as.data.frame(model.matrix(~ 0 + aov_fac)))
+  colnames(aov_list)[2:ncol(aov_list)] <- as.character(unique(aov_fac))
+  # ANOVA + post-hoc TukeyHSD for each factor
+  model_aov <- aov(formula=feature ~ aov_fac, data=aov_list)
+  model_tukey <- TukeyHSD(x=model_aov, conf.level=0.995)
+  for (j in unique(aov_fac)) {
+    if (all(model_tukey[[1]][grepl(j, rownames(model_tukey[[1]])), "p adj"] <= 0.005)) {
+      sel_aov520[[j]] <- c(sel_aov520[[j]], colnames(feat_list520)[i])
+      #print(paste(j, colnames(feat_list)[i]))
+    }
+  }
+}
+
+pdf("./Bryophytes_KPeters/Results_Manuscript/ANOVA520.pdf", paper = "a4r", width=11, height=8)
+print(paste("ANOVA Number of selected features:", f.count.selected_features(sel_feat=sel_aov520)))
+f.heatmap.selected_features(feat_list=feat_list520, sel_feat=sel_aov520, filename="feature_selection_anova.pdf",
+                            main="ANOVA", metadata=meta520$class)
+dev.off()
+
+
+save(sel_aov679, sel_aov520, file = "ANOVA.rda")
+
+
+# ---- PLS-DA ----
+
+#MTBLS679
+library(pls) #tuneGrid=data.frame(ncomp=19)
+model_pls679 <- caret::train(x=feat_list679, y=as.factor(feat_class679), method="pls",
+                             preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+print(paste("PLS-DA Number of components:", as.numeric(model_pls679$bestTune)))
+model_plsi679 <- varImp(object=model_pls679)
+#model_plsi$importance[1:10,1:5]
+rownames(model_plsi679$importance) <- as.character(rownames(model_plsi679$importance))
+sel_pls679 <- f.select_features_from_model(feat_list=feat_list679, model_varimp=model_plsi679$importance, feat_class = feat_class679)
+
+# load(file ="PLS.rda")
+# ---- plot ROC
+# ROC
+library(pROC)
+
+model_pls679
+# Select a parameter setting
+selectedIndices <- model_pls679$pred$ncomp == 9 # select best ncomp value in model_pls679
+# Plot:
+
+plsROC679 <- cbind(
+  plsAO <- plot.roc(model_pls679$pred$obs[selectedIndices]=="ANTODO",
+                    model_pls679$pred[["ANTODO"]][selectedIndices],auc =TRUE),
+  plsAP <- plot.roc(model_pls679$pred$obs[selectedIndices]=="AVEPUB",
+                    model_pls679$pred[["AVEPUB"]][selectedIndices],auc =TRUE),
+  plsCJ <- plot.roc(model_pls679$pred$obs[selectedIndices]=="CENJAC",
+                    model_pls679$pred[["CENJAC"]][selectedIndices],auc =TRUE),
+  plsDG <- plot.roc(model_pls679$pred$obs[selectedIndices]=="DACGLO",
+                    model_pls679$pred[["DACGLO"]][selectedIndices],auc =TRUE),
+  plsFR <- plot.roc(model_pls679$pred$obs[selectedIndices]=="FESRUB",
+                    model_pls679$pred[["FESRUB"]][selectedIndices],auc =TRUE),
+  plsGP <- plot.roc(model_pls679$pred$obs[selectedIndices]=="GERPRA",
+                    model_pls679$pred[["GERPRA"]][selectedIndices],auc =TRUE),
+  plsHL <- plot.roc(model_pls679$pred$obs[selectedIndices]=="HOLLAN",
+                    model_pls679$pred[["HOLLAN"]][selectedIndices],auc =TRUE),
+  plsKA <- plot.roc(model_pls679$pred$obs[selectedIndices]=="KNAARV",
+                    model_pls679$pred[["KNAARV"]][selectedIndices],auc =TRUE),
+  plsLV <- plot.roc(model_pls679$pred$obs[selectedIndices]=="LEUVUL",
+                    model_pls679$pred[["LEUVUL"]][selectedIndices],auc =TRUE),
+  plsPP <- plot.roc(model_pls679$pred$obs[selectedIndices]=="PHLPRA",
+                    model_pls679$pred[["PHLPRA"]][selectedIndices],auc =TRUE),
+  plsPL <- plot.roc(model_pls679$pred$obs[selectedIndices]=="PLALAN",
+                    model_pls679$pred[["PLALAN"]][selectedIndices],auc =TRUE),
+  plsPR <- plot.roc(model_pls679$pred$obs[selectedIndices]=="POAPRA",
+                    model_pls679$pred[["POAPRA"]][selectedIndices],auc =TRUE),
+  plsRA <- plot.roc(model_pls679$pred$obs[selectedIndices]=="RANACR",
+                    model_pls679$pred[["RANACR"]][selectedIndices],auc =TRUE)
+)
+colnames(plsROC679) <- c('ANTODO', 'AVEPUB', 'CENJAC', 'DACGLO', 'FESRUB',
+                         'GERPRA', 'HOLLAN', 'KNAARV', 'LEUVUL', 'PHLPRA',
+                         'PLALAN', 'POAPRA', 'RANACR')
+
+
+
+pdf(width=11, height=7, file='./VascularPlants_MacBeSSt/Results_Manuscript/plsROC679.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(plsAO, main = "PLS ROC ANTODO", sub = c(paste0("\nAUC:", plsAO$auc)))
+plot(plsAP, main = "PLS ROC AVEPUB", sub = c(paste0("\nAUC:", plsAP$auc)))
+plot(plsCJ, main = "PLS ROC CENJAC", sub = c(paste0("\nAUC:", plsCJ$auc)))
+plot(plsDG, main = "PLS ROC DACGLO", sub = c(paste0("\nAUC:", plsDG$auc)))
+plot(plsFR, main = "PLS ROC FESRUB", sub = c(paste0("\nAUC:", plsFR$auc)))
+plot(plsGP, main = "PLS ROC GERRPA", sub = c(paste0("\nAUC:", plsGP$auc)))
+plot(plsHL, main = "PLS ROC HOLLAN", sub = c(paste0("\nAUC:", plsHL$auc)))
+plot(plsKA, main = "PLS ROC KNAARV", sub = c(paste0("\nAUC:", plsKA$auc)))
+plot(plsLV, main = "PLS ROC LEUVUL", sub = c(paste0("\nAUC:", plsLV$auc)))
+plot(plsPP, main = "PLS ROC PHLPRA", sub = c(paste0("\nAUC:", plsPP$auc)))
+plot(plsPL, main = "PLS ROC PLALAN", sub = c(paste0("\nAUC:", plsPL$auc)))
+plot(plsPR, main = "PLS ROC POAPRA", sub = c(paste0("\nAUC:", plsPR$auc)))
+plot(plsRA, main = "PLS ROC RANACR", sub = c(paste0("\nAUC:", plsRA$auc)))
+dev.off()
+
+
+
+pdf("./VascularPlants_MacBeSSt/Results_Manuscript/PLS-DA679.pdf", paper = "a4r", width=11, height=8)
+print(paste("Number of selected features:", f.count.selected_features(sel_feat=sel_pls679)))
+f.heatmap.selected_features(feat_list=feat_list679, sel_feat=sel_pls679, filename="feature_selection_pls.pdf",
+                            main="PLS-DA MTBLS679", metadata = meta679$SpecCode)
+dev.off()
+
+#MTBLS520
+# library(pls) #tuneGrid=data.frame(ncomp=19)
+model_pls520 <- caret::train(x=feat_list520, y=as.factor(feat_class520), method="pls",
+                             preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+print(paste("PLS-DA Number of components:", as.numeric(model_pls520$bestTune)))
+model_plsi520 <- varImp(object=model_pls520)
+#model_plsi$importance[1:10,1:5]
+rownames(model_plsi520$importance) <- as.character(rownames(model_plsi520$importance))
+sel_pls520 <- f.select_features_from_model(feat_list=feat_list520, model_varimp=model_plsi520$importance, feat_class = feat_class520)
+
+# ---- plot ROC
+# ROC
+library(pROC)
+# Select a parameter setting
+selectedIndices <- model_pls520$pred$ncomp == 9 # 10 # select best mtry value
+# Plot:
+
+plsROC520 <- cbind(
+  plsBr <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Brarut",
+                    model_pls520$pred[["Brarut"]][selectedIndices],auc =TRUE),
+  plsCa <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Calcus",
+                    model_pls520$pred[["Calcus"]][selectedIndices],auc =TRUE),
+  plsFi <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Fistax",
+                    model_pls520$pred[["Fistax"]][selectedIndices],auc =TRUE),
+  plsGr <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Gripul",
+                    model_pls520$pred[["Gripul"]][selectedIndices],auc =TRUE),
+  plsHy <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Hypcup",
+                    model_pls520$pred[["Hypcup"]][selectedIndices],auc =TRUE),
+  plsMa <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Marpol",
+                    model_pls520$pred[["Marpol"]][selectedIndices],auc =TRUE),
+  plsPl <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Plaund",
+                    model_pls520$pred[["Plaund"]][selectedIndices],auc =TRUE),
+  plsPo <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Polstr",
+                    model_pls520$pred[["Polstr"]][selectedIndices],auc =TRUE),
+  plsRh <- plot.roc(model_pls520$pred$obs[selectedIndices]=="Rhysqu",
+                    model_pls520$pred[["Rhysqu"]][selectedIndices],auc =TRUE)
+)
+colnames(plsROC520) <- c('Brarut',
+                         'Calcus', 
+                         'Fistax', 
+                         'Gripul', 
+                         'Hypcup',
+                         'Marpol',
+                         'Plaund',
+                         'Polstr', 
+                         'Rhysqu'
+)
+
+
+
+pdf(width=11, height=7, file='./Bryophytes_KPeters/Results_Manuscript/plsROC520.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(plsBr, main = "PLS ROC Brarut", sub = c(paste0("\nAUC:", plsBr$auc)))
+plot(plsCa, main = "PLS ROC Calcus", sub = c(paste0("\nAUC:", plsCa$auc)))
+plot(plsFi, main = "PLS ROC Fistax", sub = c(paste0("\nAUC:", plsFi$auc)))
+plot(plsGr, main = "PLS ROC Gripul", sub = c(paste0("\nAUC:", plsGr$auc)))
+plot(plsHy, main = "PLS ROC Hypcup", sub = c(paste0("\nAUC:", plsHy$auc)))
+plot(plsMa, main = "PLS ROC Marpol", sub = c(paste0("\nAUC:", plsMa$auc)))
+plot(plsPl, main = "PLS ROC Plaund", sub = c(paste0("\nAUC:", plsPl$auc)))
+plot(plsPo, main = "PLS ROC Polstr", sub = c(paste0("\nAUC:", plsPo$auc)))
+plot(plsRh, main = "PLS ROC Rhysqu", sub = c(paste0("\nAUC:", plsRh$auc)))
+dev.off()
+
+pdf("./Bryophytes_KPeters/Results_Manuscript/PLS-DA520.pdf", paper = "a4r", width=11, height=8)
+print(paste("Number of selected features:", f.count.selected_features(sel_feat=sel_pls520)))
+f.heatmap.selected_features(feat_list=feat_list520, sel_feat=sel_pls520, filename="feature_selection_pls.pdf", 
+                            main="PLS-DA MTBLS520", metadata = meta520$class)
+dev.off()
+
+save(model_pls679, model_plsi679, sel_pls679, model_pls520, model_plsi520, sel_pls520, file = "PLS.rda")
+
+
+# ---- SVM ---- 
+# MTBLS679
+library(e1071)
+model_svm679 <- caret::train(x=as.matrix(feat_list679), y=as.factor(feat_class679), method="svmLinear2", shrinking=TRUE, probability=TRUE, fitted=TRUE,
+                             preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+model_svmi679 <- varImp(object=model_svm679) #RFE Recursive Feature Elimination
+model_svmi679$importance[1:10,1:5]
+rownames(model_svmi679$importance) <- as.character(rownames(model_svmi679$importance))
+sel_svm679 <- f.select_features_from_model(feat_list=feat_list679, model_varimp=model_svmi679$importance, feat_class = feat_class679)
+
+# ---- plot ROC
+# ROC
+library(pROC)
+
+model_svm679
+# Select a parameter setting
+selectedIndices <- model_svm679$pred$cost == 0.25 # select best ncomp value in model_pls679
+# Plot:
+
+svmROC679 <- cbind(
+  svmAO <- plot.roc(model_svm679$pred$obs[selectedIndices]=="ANTODO",
+                    model_svm679$pred[["ANTODO"]][selectedIndices],auc =TRUE),
+  svmAP <- plot.roc(model_svm679$pred$obs[selectedIndices]=="AVEPUB",
+                    model_svm679$pred[["AVEPUB"]][selectedIndices],auc =TRUE),
+  svmCJ <- plot.roc(model_svm679$pred$obs[selectedIndices]=="CENJAC",
+                    model_svm679$pred[["CENJAC"]][selectedIndices],auc =TRUE),
+  svmDG <- plot.roc(model_svm679$pred$obs[selectedIndices]=="DACGLO",
+                    model_svm679$pred[["DACGLO"]][selectedIndices],auc =TRUE),
+  svmFR <- plot.roc(model_svm679$pred$obs[selectedIndices]=="FESRUB",
+                    model_svm679$pred[["FESRUB"]][selectedIndices],auc =TRUE),
+  svmGP <- plot.roc(model_svm679$pred$obs[selectedIndices]=="GERPRA",
+                    model_svm679$pred[["GERPRA"]][selectedIndices],auc =TRUE),
+  svmHL <- plot.roc(model_svm679$pred$obs[selectedIndices]=="HOLLAN",
+                    model_svm679$pred[["HOLLAN"]][selectedIndices],auc =TRUE),
+  svmKA <- plot.roc(model_svm679$pred$obs[selectedIndices]=="KNAARV",
+                    model_svm679$pred[["KNAARV"]][selectedIndices],auc =TRUE),
+  svmLV <- plot.roc(model_svm679$pred$obs[selectedIndices]=="LEUVUL",
+                    model_svm679$pred[["LEUVUL"]][selectedIndices],auc =TRUE),
+  svmPP <- plot.roc(model_svm679$pred$obs[selectedIndices]=="PHLPRA",
+                    model_svm679$pred[["PHLPRA"]][selectedIndices],auc =TRUE),
+  svmPL <- plot.roc(model_svm679$pred$obs[selectedIndices]=="PLALAN",
+                    model_svm679$pred[["PLALAN"]][selectedIndices],auc =TRUE),
+  svmPR <- plot.roc(model_svm679$pred$obs[selectedIndices]=="POAPRA",
+                    model_svm679$pred[["POAPRA"]][selectedIndices],auc =TRUE),
+  svmRA <- plot.roc(model_svm679$pred$obs[selectedIndices]=="RANACR",
+                    model_svm679$pred[["RANACR"]][selectedIndices],auc =TRUE)
+)
+colnames(svmROC679) <- c('ANTODO', 'AVEPUB', 'CENJAC', 'DACGLO', 'FESRUB',
+                         'GERPRA', 'HOLLAN', 'KNAARV', 'LEUVUL', 'PHLPRA',
+                         'PLALAN', 'POAPRA', 'RANACR')
+
+
+
+pdf(width=11, height=7, file='./VascularPlants_MacBeSSt/Results_Manuscript/svmROC679.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(svmAO, main = "SVM ROC ANTODO", sub = c(paste0("\nAUC:", svmAO$auc)))
+plot(svmAP, main = "SVM ROC AVEPUB", sub = c(paste0("\nAUC:", svmAP$auc)))
+plot(svmCJ, main = "SVM ROC CENJAC", sub = c(paste0("\nAUC:", svmCJ$auc)))
+plot(svmDG, main = "SVM ROC DACGLO", sub = c(paste0("\nAUC:", svmDG$auc)))
+plot(svmFR, main = "SVM ROC FESRUB", sub = c(paste0("\nAUC:", svmFR$auc)))
+plot(svmGP, main = "SVM ROC GERRPA", sub = c(paste0("\nAUC:", svmGP$auc)))
+plot(svmHL, main = "SVM ROC HOLLAN", sub = c(paste0("\nAUC:", svmHL$auc)))
+plot(svmKA, main = "SVM ROC KNAARV", sub = c(paste0("\nAUC:", svmKA$auc)))
+plot(svmLV, main = "SVM ROC LEUVUL", sub = c(paste0("\nAUC:", svmLV$auc)))
+plot(svmPP, main = "SVM ROC PHLPRA", sub = c(paste0("\nAUC:", svmPP$auc)))
+plot(svmPL, main = "SVM ROC PLALAN", sub = c(paste0("\nAUC:", svmPL$auc)))
+plot(svmPR, main = "SVM ROC POAPRA", sub = c(paste0("\nAUC:", svmPR$auc)))
+plot(svmRA, main = "SVM ROC RANACR", sub = c(paste0("\nAUC:", svmRA$auc)))
+dev.off()
+
+
+pdf("./VascularPlants_MacBeSSt/Results_Manuscript/SVM679.pdf", paper = "a4r", width=11, height=8)
+print(paste("SVM Number of selected features:", f.count.selected_features(sel_feat=sel_svm679)))
+f.heatmap.selected_features(feat_list=feat_list679, sel_feat=sel_svm679, filename="feature_selection_svm.pdf",
+                            main="SVM - MTBLS679", metadata = meta679$SpecCode)
+dev.off()  
+
+# save(model_svm679, model_svmi679, sel_svm679, file = "SVM679.rda")
+
+
+#MTBLS520
+# library(e1071)
+model_svm520 <- caret::train(x=as.matrix(feat_list520), y=as.factor(feat_class520), method="svmLinear2", shrinking=TRUE, probability=TRUE, fitted=TRUE,
+                             preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+model_svmi520 <- varImp(object=model_svm520) #RFE Recursive Feature Elimination
+model_svmi520$importance[1:10,1:5]
+rownames(model_svmi520$importance) <- as.character(rownames(model_svmi520$importance))
+sel_svm520 <- f.select_features_from_model(feat_list=feat_list520, model_varimp=model_svmi520$importance, feat_class = feat_class520)
+
+# ---- plot ROC
+# ROC
+library(pROC)
+# Select a parameter setting
+selectedIndices <- model_svm520$pred$cost  == 0.25 # select best mtry value
+# Plot:
+
+svmROC520 <- cbind(
+  svmBr <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Brarut",
+                    model_svm520$pred[["Brarut"]][selectedIndices],auc =TRUE),
+  svmCa <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Calcus",
+                    model_svm520$pred[["Calcus"]][selectedIndices],auc =TRUE),
+  svmFi <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Fistax",
+                    model_svm520$pred[["Fistax"]][selectedIndices],auc =TRUE),
+  svmGr <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Gripul",
+                    model_svm520$pred[["Gripul"]][selectedIndices],auc =TRUE),
+  svmHy <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Hypcup",
+                    model_svm520$pred[["Hypcup"]][selectedIndices],auc =TRUE),
+  svmMa <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Marpol",
+                    model_svm520$pred[["Marpol"]][selectedIndices],auc =TRUE),
+  svmPl <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Plaund",
+                    model_svm520$pred[["Plaund"]][selectedIndices],auc =TRUE),
+  svmPo <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Polstr",
+                    model_svm520$pred[["Polstr"]][selectedIndices],auc =TRUE),
+  svmRh <- plot.roc(model_svm520$pred$obs[selectedIndices]=="Rhysqu",
+                    model_svm520$pred[["Rhysqu"]][selectedIndices],auc =TRUE)
+)
+colnames(svmROC520) <- c('Brarut',
+                         'Calcus', 
+                         'Fistax', 
+                         'Gripul', 
+                         'Hypcup',
+                         'Marpol',
+                         'Plaund',
+                         'Polstr', 
+                         'Rhysqu'
+)
+
+
+
+pdf(width=11, height=7, file='./Bryophytes_KPeters/Results_Manuscript/svmROC520.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(svmBr, main = "SVM ROC Brarut", sub = c(paste0("\nAUC:", svmBr$auc)))
+plot(svmCa, main = "SVM ROC Calcus", sub = c(paste0("\nAUC:", svmCa$auc)))
+plot(svmFi, main = "SVM ROC Fistax", sub = c(paste0("\nAUC:", svmFi$auc)))
+plot(svmGr, main = "SVM ROC Gripul", sub = c(paste0("\nAUC:", svmGr$auc)))
+plot(svmHy, main = "SVM ROC Hypcup", sub = c(paste0("\nAUC:", svmHy$auc)))
+plot(svmMa, main = "SVM ROC Marpol", sub = c(paste0("\nAUC:", svmMa$auc)))
+plot(svmPl, main = "SVM ROC Plaund", sub = c(paste0("\nAUC:", svmPl$auc)))
+plot(svmPo, main = "SVM ROC Polstr", sub = c(paste0("\nAUC:", svmPo$auc)))
+plot(svmRh, main = "SVM ROC Rhysqu", sub = c(paste0("\nAUC:", svmRh$auc)))
+dev.off()
+
+
+pdf("./Bryophytes_KPeters/Results_Manuscript/SVM520.pdf", paper = "a4r", width=11, height=8)
+print(paste("SVM Number of selected features:", f.count.selected_features(sel_feat=sel_svm520)))
+f.heatmap.selected_features(feat_list=feat_list520, sel_feat=sel_svm520, filename="feature_selection_svm.pdf",
+                            main="SVM - MTBLS520", metadata = meta520$class)
+dev.off()  
+
+
+save(model_svm679, model_svmi679, sel_svm679, model_svm520, model_svmi520, sel_svm520, file = "SVM.rda")
+
+
+# ---- RF ----
+library(caret)  
+# MTBLS679  
+model_rf679 <- caret::train(x=as.matrix(feat_list679), y=feat_class679, method="rf", importance=TRUE, proximity=TRUE,
+                            preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+model_rfi679 <- varImp(object=model_rf679)
+model_rfi679$importance[1:10,1:5]
+rownames(model_rfi679$importance) <- as.character(rownames(model_rfi679$importance))
+sel_rf679 <- f.select_features_from_model(feat_list=feat_list679, model_varimp=model_rfi679$importance, feat_class = feat_class679)
+
+# ---- plot ROC
+# ROC
+library(pROC)
+
+model_rf679
+# Select a parameter setting
+selectedIndices <- model_rf679$pred$mtry == 228 # 13 # select best mtry value
+# Plot:
+
+rfROC679 <- cbind(
+  rfAO <- plot.roc(model_rf679$pred$obs[selectedIndices]=="ANTODO",
+                   model_rf679$pred[["ANTODO"]][selectedIndices],auc =TRUE),
+  rfAP <- plot.roc(model_rf679$pred$obs[selectedIndices]=="AVEPUB",
+                   model_rf679$pred[["AVEPUB"]][selectedIndices],auc =TRUE),
+  rfCJ <- plot.roc(model_rf679$pred$obs[selectedIndices]=="CENJAC",
+                   model_rf679$pred[["CENJAC"]][selectedIndices],auc =TRUE),
+  rfDG <- plot.roc(model_rf679$pred$obs[selectedIndices]=="DACGLO",
+                   model_rf679$pred[["DACGLO"]][selectedIndices],auc =TRUE),
+  rfFR <- plot.roc(model_rf679$pred$obs[selectedIndices]=="FESRUB",
+                   model_rf679$pred[["FESRUB"]][selectedIndices],auc =TRUE),
+  rfGP <- plot.roc(model_rf679$pred$obs[selectedIndices]=="GERPRA",
+                   model_rf679$pred[["GERPRA"]][selectedIndices],auc =TRUE),
+  rfHL <- plot.roc(model_rf679$pred$obs[selectedIndices]=="HOLLAN",
+                   model_rf679$pred[["HOLLAN"]][selectedIndices],auc =TRUE),
+  rfKA <- plot.roc(model_rf679$pred$obs[selectedIndices]=="KNAARV",
+                   model_rf679$pred[["KNAARV"]][selectedIndices],auc =TRUE),
+  rfLV <- plot.roc(model_rf679$pred$obs[selectedIndices]=="LEUVUL",
+                   model_rf679$pred[["LEUVUL"]][selectedIndices],auc =TRUE),
+  rfPP <- plot.roc(model_rf679$pred$obs[selectedIndices]=="PHLPRA",
+                   model_rf679$pred[["PHLPRA"]][selectedIndices],auc =TRUE),
+  rfPL <- plot.roc(model_rf679$pred$obs[selectedIndices]=="PLALAN",
+                   model_rf679$pred[["PLALAN"]][selectedIndices],auc =TRUE),
+  rfPR <- plot.roc(model_rf679$pred$obs[selectedIndices]=="POAPRA",
+                   model_rf679$pred[["POAPRA"]][selectedIndices],auc =TRUE),
+  rfRA <- plot.roc(model_rf679$pred$obs[selectedIndices]=="RANACR",
+                   model_rf679$pred[["RANACR"]][selectedIndices],auc =TRUE)
+)
+colnames(rfROC679) <- c('ANTODO', 'AVEPUB', 'CENJAC', 'DACGLO', 
+                        'FESRUB', 'GERPRA', 'HOLLAN', 'KNAARV', 
+                        'LEUVUL', 'PHLPRA', 'PLALAN', 'POAPRA',
+                        'RANACR')
+
+
+
+pdf(width=11, height=7, file='./VascularPlants_MacBeSSt/Results_Manuscript/rfROC679.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(rfAO, main = "RF ROC ANTODO", sub = c(paste0("\nAUC:", rfAO$auc)))
+plot(rfAP, main = "RF ROC AVEPUB", sub = c(paste0("\nAUC:", rfAP$auc)))
+plot(rfCJ, main = "RF ROC CENJAC", sub = c(paste0("\nAUC:", rfCJ$auc)))
+plot(rfDG, main = "RF ROC DACGLO", sub = c(paste0("\nAUC:", rfDG$auc)))
+plot(rfFR, main = "RF ROC FESRUB", sub = c(paste0("\nAUC:", rfFR$auc)))
+plot(rfGP, main = "RF ROC GERRPA", sub = c(paste0("\nAUC:", rfGP$auc)))
+plot(rfHL, main = "RF ROC HOLLAN", sub = c(paste0("\nAUC:", rfHL$auc)))
+plot(rfKA, main = "RF ROC KNAARV", sub = c(paste0("\nAUC:", rfKA$auc)))
+plot(rfLV, main = "RF ROC LEUVUL", sub = c(paste0("\nAUC:", rfLV$auc)))
+plot(rfPP, main = "RF ROC PHLPRA", sub = c(paste0("\nAUC:", rfPP$auc)))
+plot(rfPL, main = "RF ROC PLALAN", sub = c(paste0("\nAUC:", rfPL$auc)))
+plot(rfPR, main = "RF ROC POAPRA", sub = c(paste0("\nAUC:", rfPR$auc)))
+plot(rfRA, main = "RF ROC RANACR", sub = c(paste0("\nAUC:", rfRA$auc)))
+dev.off()
+
+
+pdf("./VascularPlants_MacBeSSt/Results_Manuscript/RF679.pdf", paper = "a4r", width=11, height=8)
+print(paste("RF679 Number of selected features:", f.count.selected_features(sel_feat=sel_rf679)))
+f.heatmap.selected_features(feat_list=feat_list679, sel_feat=sel_rf679, filename="feature_selection_rf2.pdf", 
+                            main="Random Forest - MTBLS679", metadata = meta679$SpecCode)
+dev.off()
+
+# save(model_rf679, model_rfi679, sel_rf679, file = "RF679.rda")
+
+
+# MTBLS520  
+model_rf520 <- caret::train(x=as.matrix(feat_list520), y=feat_class520, method="rf", importance=TRUE, proximity=TRUE,
+                            preProcess=c("center", "scale"), tuneLength=10, trControl=trainControl(method="cv", classProbs=T, savePredictions = T))
+
+model_rfi520 <- varImp(object=model_rf520)
+model_rfi520$importance[1:10,1:5]
+rownames(model_rfi520$importance) <- as.character(rownames(model_rfi520$importance))
+sel_rf520 <- f.select_features_from_model(feat_list=feat_list520, model_varimp=model_rfi520$importance, feat_class = feat_class520)
+
+model_rf520
+
+# ---- plot ROC
+# ROC
+library(pROC)
+# Select a parameter setting
+selectedIndices <- model_rf520$pred$mtry == 4361 # 5 # select best mtry value
+# Plot:
+
+rfROC520 <- cbind(
+  rfBr <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Brarut",
+                   model_rf520$pred[["Brarut"]][selectedIndices],auc =TRUE),
+  rfCa <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Calcus",
+                   model_rf520$pred[["Calcus"]][selectedIndices],auc =TRUE),
+  rfFi <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Fistax",
+                   model_rf520$pred[["Fistax"]][selectedIndices],auc =TRUE),
+  rfGr <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Gripul",
+                   model_rf520$pred[["Gripul"]][selectedIndices],auc =TRUE),
+  rfHy <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Hypcup",
+                   model_rf520$pred[["Hypcup"]][selectedIndices],auc =TRUE),
+  rfMa <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Marpol",
+                   model_rf520$pred[["Marpol"]][selectedIndices],auc =TRUE),
+  rfPl <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Plaund",
+                   model_rf520$pred[["Plaund"]][selectedIndices],auc =TRUE),
+  rfPo <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Polstr",
+                   model_rf520$pred[["Polstr"]][selectedIndices],auc =TRUE),
+  rfRh <- plot.roc(model_rf520$pred$obs[selectedIndices]=="Rhysqu",
+                   model_rf520$pred[["Rhysqu"]][selectedIndices],auc =TRUE)
+)
+colnames(rfROC520) <- c('Brarut', 'Calcus', 'Fistax', 'Gripul', 
+                        'Hypcup', 'Marpol', 'Plaund', 'Polstr', 
+                        'Rhysqu')
+
+
+
+pdf(width=11, height=7, file='./Bryophytes_KPeters/Results_Manuscript/rfROC520.pdf')
+par(mfrow=c(3,3), mar=c(2,2,2,0)+.5) #5,4,2,0
+plot(rfBr, main = "RF ROC Brarut", sub = c(paste0("\nAUC:", rfBr$auc)))
+plot(rfCa, main = "RF ROC Calcus", sub = c(paste0("\nAUC:", rfCa$auc)))
+plot(rfFi, main = "RF ROC Fistax", sub = c(paste0("\nAUC:", rfFi$auc)))
+plot(rfGr, main = "RF ROC Gripul", sub = c(paste0("\nAUC:", rfGr$auc)))
+plot(rfHy, main = "RF ROC Hypcup", sub = c(paste0("\nAUC:", rfHy$auc)))
+plot(rfMa, main = "RF ROC Marpol", sub = c(paste0("\nAUC:", rfMa$auc)))
+plot(rfPl, main = "RF ROC Plaund", sub = c(paste0("\nAUC:", rfPl$auc)))
+plot(rfPo, main = "RF ROC Polstr", sub = c(paste0("\nAUC:", rfPo$auc)))
+plot(rfRh, main = "RF ROC Rhysqu", sub = c(paste0("\nAUC:", rfRh$auc)))
+dev.off()
+
+
+pdf("./Bryophytes_KPeters/Results_Manuscript/RF520.pdf", paper = "a4r", width=11, height=8)
+print(paste("Number of selected features:", f.count.selected_features(sel_feat=sel_rf520)))
+f.heatmap.selected_features(feat_list=feat_list520, sel_feat=sel_rf520, filename="feature_selection_rf2.pdf", 
+                            main="Random Forest - MTBLS520", metadata = meta520$class)
+dev.off()
+
+save(model_rf679, model_rfi679, sel_rf679, model_rf520, model_rfi520, sel_rf520, file = "RF.rda")
+
+# ---------- List selected features per model ----------
+
+
+
+# # ---- load models
+# load(file ="ANOVA.rda")
+# load(file ="PLS.rda")
+# load(file ="SVM.rda")
+# load(file ="RF.rda")
+
+# ---- feature selection all models MTBLS679
+sink(file = paste0("./VascularPlants_MacBeSSt/Results_Manuscript/FeatureSelectionModels679.txt"))
+cat("\nmin selected Features sum\n")
+print(keepx_min)    # print dimensions samples by feature
+cat("\nmax selected Features sum\n")
+print(keepx_max)    # print dimensions samples by feature
+cat("\nANOVA selected Features sum\n")
+print(sum(sapply(sel_aov679, length)))    # print dimensions samples by feature
+cat("\nANOVA selected Features number\n")
+print(lapply(sel_aov679, length))    # print dimensions samples by feature
+cat("\nANOVA selected Features names\n")
+print(sel_aov679)    # print dimensions samples by feature
+cat("\nPLS-DA selected Features sum\n")
+print(sum(sapply(sel_pls679, length)))    # print dimensions samples by feature
+cat("\nPLS-DA selected Features number\n")
+print(lapply(sel_pls679, length))    # print dimensions samples by feature
+cat("\nPLS-DA selected Features names\n")
+print(sel_pls679)    # print dimensions samples by feature
+cat("\nPLS-DA AUROCs\n")
+print(plsROC679)    # print dimensions samples by feature
+cat("\nSVM selected Features sum\n")
+print(sum(sapply(sel_svm679, length)))    # print dimensions samples by feature
+cat("\nSVM selected Features number\n")
+print(lapply(sel_svm679, length))    # print dimensions samples by feature
+cat("\nSVM selected Features names\n")
+print(sel_svm679)    # print dimensions samples by feature
+cat("\nSVM AUROCs\n")
+print(svmROC679)    # print dimensions samples by feature
+cat("\nRF selected Features sum\n")
+print(sum(sapply(sel_rf679, length)))    # print dimensions samples by feature
+cat("\nRF selected Features number\n")
+print(lapply(sel_rf679, length))    # print dimensions samples by feature
+cat("\nRF selected Features names\n")
+print(sel_rf679)    # print dimensions samples by feature
+cat("\nRF AUROCs\n")
+print(rfROC679)    # print dimensions samples by feature
+sink()
+
+
+
+
+
+# ---- feature selection all models MTBLS520 
+sink(file = paste0("./Bryophytes_KPeters/Results_Manuscript/FeatureSelectionModels520.txt"))
+cat("\nmin selected Features sum\n")
+print(keepx_min)    # print dimensions samples by feature
+cat("\nmax selected Features sum\n")
+print(keepx_max)    # print dimensions samples by feature
+cat("\nANOVA selected Features sum\n")
+print(sum(sapply(sel_aov520, length)))    # print dimensions samples by feature
+cat("\nANOVA selected Features number\n")
+print(lapply(sel_aov520, length))    # print dimensions samples by feature
+cat("\nANOVA selected Features names\n")
+print(sel_aov520)    # print dimensions samples by feature
+cat("\nPLS-DA selected Features sum\n")
+print(sum(sapply(sel_pls520, length)))    # print dimensions samples by feature
+cat("\nPLS-DA selected Features number\n")
+print(lapply(sel_pls520, length))    # print dimensions samples by feature
+cat("\nPLS-DA selected Features names\n")
+print(sel_pls520)    # print dimensions samples by feature
+cat("\nPLS-DA AUROCs \n")
+print(plsROC520)    # print dimensions samples by feature
+cat("\nSVM selected Features sum\n")
+print(sum(sapply(sel_svm520, length)))    # print dimensions samples by feature
+cat("\nSVM selected Features number\n")
+print(lapply(sel_svm520, length))    # print dimensions samples by feature
+cat("\nSVM selected Features names\n")
+print(sel_svm520)    # print dimensions samples by feature
+cat("\nSVM AUROCs\n")
+print(svmROC520)    # print dimensions samples by feature
+cat("\nRF selected Features sum\n")
+print(sum(sapply(sel_rf520, length)))    # print dimensions samples by feature
+cat("\nRF selected Features number\n")
+print(lapply(sel_rf520, length))    # print dimensions samples by feature
+cat("\nRF selected Features names\n")
+print(sel_rf520)    # print dimensions samples by feature
+cat("\nRF AUROCs\n")
+print(rfROC520)    # print dimensions samples by feature
+sink()
+
+
+# ---------- Comparison charts ----------
+# Draw Venn diagram
+library(VennDiagram)
+
+# load(file = "Venn.rda")
+# model list MTBLS679
+model_list679 <- list()
+# model_list[["ANOVA"]] <- as.character(unique(unlist(sel_aov679)))
+model_list679[["PLS"]] <- as.character(unlist(sel_pls679)) #as.character(unique(unlist(sel_pls679)))
+model_list679[["RF"]] <- as.character(unlist(sel_rf679)) #as.character(unique(unlist(sel_rf679)))
+model_list679[["SVM"]] <- as.character(unlist(sel_svm679)) #as.character(unique(unlist(sel_svm679)))
+
+#venn(data=model_list, intersections=TRUE, show.plot=TRUE)
+pdf("./VascularPlants_MacBeSSt/Results_Manuscript/VennComparison679.pdf", paper = "a4r", width=11, height=8)
+# model_venn679 <- venn.diagram(x=model_list, filename=NULL, col="transparent", fill=rainbow(n=4),
+#                               main="Feature Selection Models Vascular Plants",
+#                               alpha=0.5, cex=1.0, cat.cex=1.0, cat.pos=0.1, cat.dist=c(0.1,0.1,0.04,0.03),#cat.dist=c(0.1,0.1,0.04,0.03,0.1),
+#                               cat.fontface="bold", rotation.degree=0, margin=c(0,0,0,0),
+#                               cat.fontfamily="Helvetica", fontfamily="Helvetica")
+
+model_venn679 <- venn.diagram(x=model_list679, filename=NULL, col="transparent",  fill= c("deeppink", "springgreen4", "purple"), #rainbow(n=4),
+                              main="Feature Selection Models Vascular Plants",
+                              alpha=0.6, cex=1.0, cat.cex=1.0, cat.pos=c(- 25, 25, 0.1), cat.dist=c(-0.04,-0.04,-0.36),#cat.dist=c(0.1,0.1,0.04,0.03,0.1),
+                              cat.fontface="bold", rotation.degree=0, margin=c(0,0,0,0),
+                              cat.fontfamily="Helvetica", fontfamily="Helvetica", force.unique = FALSE)
+
+
+grid.newpage()
+grid.draw(model_venn679)
+# mtext(text="Comparison of Total Feature Selection Models", adj=0.5, line=2, font=3, cex=1.2)
+dev.off()
+
+
+
+# model list MTBLS520
+model_list520 <- list()
+# model_list[["ANOVA"]] <- as.character(unique(unlist(sel_aov520)))
+model_list520[["PLS"]] <- as.character(unique(unlist(sel_pls520)))
+model_list520[["RF"]] <- as.character(unique(unlist(sel_rf520)))
+model_list520[["SVM"]] <- as.character(unique(unlist(sel_svm520)))
+
+#venn(data=model_list, intersections=TRUE, show.plot=TRUE)
+pdf("./Bryophytes_KPeters/Results_Manuscript/VennComparison520.pdf", paper = "a4r", width=11, height=8)
+# model_venn520 <- venn.diagram(x=model_list, filename=NULL, col="transparent", fill=rainbow(n=4),
+#                               main="Feature Selection Models Bryophytes",
+#                               alpha=0.5, cex=1.0, cat.cex=1.0, cat.pos=0.1, cat.dist=c(0.1,0.1,0.04,0.03),#cat.dist=c(0.1,0.1,0.04,0.03,0.1),
+#                               cat.fontface="bold", rotation.degree=0, margin=c(0,0,0,0),
+#                               cat.fontfamily="Helvetica", fontfamily="Helvetica")
+
+model_venn520 <- venn.diagram(x=model_list520, filename=NULL, col="transparent",  fill= c("deeppink", "springgreen4", "purple"), #rainbow(n=4),
+                              main="Feature Selection Models Bryophytes",
+                              alpha=0.6, cex=1.0, cat.cex=1.0, cat.pos=c(45, -45, 0.1), cat.dist=c(-0.04, -0.04,-0.36),#cat.dist=c(0.1,0.1,0.04,0.03,0.1),
+                              cat.fontface="bold", rotation.degree=180, margin=c(0,0,0,0),
+                              cat.fontfamily="Helvetica", fontfamily="Helvetica", force.unique = FALSE)
+
+grid.newpage()
+grid.draw(model_venn520)
+# mtext(text="Comparison of total feature selection models", adj=0.5, line=2, font=3, cex=1.2)
+dev.off()
+
+
+save(model_venn679, model_venn520, file = "Venn.rda")
+
+
+# ---- plot Venn Digramms in one panel
+
+
+library(gridExtra)
+grid.arrange(gTree(children=model_venn679), gTree(children=model_venn520), ncol=2)
+
+
+
+
+# ---- stop Cluster when done ----
+stopCluster(cl)
+
+```
+
+```{r sessionInfo()}
+sessionInfo()
+```
